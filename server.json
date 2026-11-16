@@ -1,0 +1,29 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.coderneme/neme-world",
+  "title": "neme.world",
+  "description": "Publish a web game to neme.world: upload a preview, go live, roll back, read its play numbers.",
+  "websiteUrl": "https://neme.world/developers",
+  "repository": {
+    "url": "https://github.com/coderneme/neme-cli",
+    "source": "github"
+  },
+  "version": "0.5.2",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "neme-world",
+      "version": "0.5.2",
+      "transport": { "type": "stdio" },
+      "packageArguments": [{ "type": "positional", "value": "mcp" }],
+      "environmentVariables": [
+        {
+          "name": "NEME_TOKEN",
+          "description": "An API token from your neme.world dashboard",
+          "isRequired": true,
+          "isSecret": true
+        }
+      ]
+    }
+  ]
+}

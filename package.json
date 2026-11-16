@@ -1,0 +1,16 @@
+{
+  "name": "neme-world",
+  "version": "0.5.2",
+  "description": "Publish web games to neme.world from the command line",
+  "keywords": ["neme", "games", "web games", "html5 games", "game hosting", "publish", "deploy", "cli", "mcp", "mcp-server", "ai agents"],
+  "homepage": "https://neme.world/developers",
+  "repository": { "type": "git", "url": "git+https://github.com/coderneme/neme-cli.git" },
+  "bugs": "https://github.com/coderneme/neme-cli/issues",
+  "mcpName": "io.github.coderneme/neme-world",
+  "license": "MIT",
+  "author": "NEME LIMITED",
+  "type": "module",
+  "bin": { "neme": "src/cli.js" },
+  "files": ["src/cli.js"],
+  "engines": { "node": ">=20" }
+}
