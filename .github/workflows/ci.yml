@@ -1,0 +1,33 @@
+# Checks that the tool starts as an MCP server and offers its tools, on every Node version it supports and in the container.
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  node:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: [20, 22, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: node --check src/cli.js
+      - run: node src/cli.js --help
+      - run: node .github/smoke.mjs node src/cli.js mcp
+      - name: server.json and package.json agree
+        run: node -e "const p=require('./package.json'),s=require('./server.json');if(s.version!==p.version||s.packages[0].version!==p.version||s.name!==p.mcpName)throw new Error('server.json does not match package.json')"
+  container:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: docker build -t neme-cli .
+      - run: node .github/smoke.mjs docker run --rm -i neme-cli

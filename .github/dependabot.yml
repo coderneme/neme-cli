@@ -1,0 +1,11 @@
+# The tool has no dependencies of its own; this keeps the actions its checks use up to date.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
