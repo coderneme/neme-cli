@@ -7,16 +7,70 @@
  *   neme publish [dir]    publish the build as a new version (add --preview to hold it back)
  *   neme promote <n>      make version n the live one
  *
+ * With no API token, "neme publish" still works: the game goes online for a day at a temporary
+ * address, and the command prints a link that keeps it (see `access`).
+ *
  * Plain JavaScript on purpose: it runs from a checkout or from npm with no build.
  */
 import { createHash } from 'node:crypto'
 import { createReadStream, openAsBlob, realpathSync } from 'node:fs'
-import { readdir, readFile, stat, writeFile } from 'node:fs/promises'
+import { access as canAccess, constants, lstat, mkdir, readdir, readFile, realpath, rename, stat, writeFile } from 'node:fs/promises'
+import { homedir, tmpdir, userInfo } from 'node:os'
 import path from 'node:path'
 import { createInterface } from 'node:readline'
 import { parseArgs } from 'node:util'
 
 const DEFAULT_API = 'https://neme.world'
+/**
+ * Where the tool remembers the games this user published without an account, so that publishing
+ * again goes to the same game. It is kept with the user's own settings and never in the project:
+ * a project is often someone else's repository, and a file found there could point the upload
+ * at their game and hand out their link.
+ *
+ * Usually the settings folder is nowhere near the project. Where it would be inside it (a
+ * container whose home folder is the checkout), a folder of the user's own under the system's
+ * temporary folder is used instead, and only if it is theirs alone. Null when there is nowhere
+ * safe: then nothing is remembered, and nothing found is believed.
+ * @param {string} project The project folder, resolved.
+ * @returns {Promise<string | null>}
+ */
+async function trialsFile(project) {
+  const inside = (/** @type {string} */ dir) => dir === project || dir.startsWith(project + path.sep)
+  const resolved = async (/** @type {string} */ dir) => {
+    // (As far as it exists: a link part-way along the path is followed, so the comparison is of real places.)
+    let at = path.resolve(dir)
+    const tail = []
+    for (;;) {
+      const real = await realpath(at).catch(() => null)
+      if (real) return path.join(real, ...tail)
+      const up = path.dirname(at)
+      if (up === at) return path.resolve(dir)
+      tail.unshift(path.basename(at))
+      at = up
+    }
+  }
+  const usual = await resolved(process.env.NEME_STATE_DIR || path.join(process.env.XDG_CONFIG_HOME || path.join(homedir(), '.config'), 'neme-world'))
+  if (!inside(usual)) return path.join(usual, 'trials.json')
+  let uid = -1
+  try {
+    uid = userInfo().uid
+  } catch {
+    // no user to name the folder after
+  }
+  const own = await resolved(path.join(tmpdir(), `neme-world-${uid === -1 ? 'user' : uid}`))
+  if (inside(own)) return null
+  try {
+    await mkdir(own, { mode: 0o700 }).catch((err) => {
+      if (/** @type {NodeJS.ErrnoException} */ (err).code !== 'EEXIST') throw err
+    })
+    const info = await lstat(own)
+    // Someone else's folder, a link, or one others can write to is not a place to keep an upload key.
+    if (!info.isDirectory() || (uid !== -1 && info.uid !== uid) || (info.mode & 0o022) !== 0) return null
+    return path.join(own, 'trials.json')
+  } catch {
+    return null
+  }
+}
 const SKIP_DIRS = new Set(['node_modules'])
 
 /**
@@ -149,6 +203,135 @@ async function gameExists(api, token, slug) {
   throw new CliError(`${data.error ?? `Could not check whether "${slug}" exists (${res.status})`}`)
 }
 
+/** @param {number} ts */
+const when = (ts) => `${new Date(ts).toISOString().slice(0, 16).replace('T', ' ')} UTC`
+
+/**
+ * @typedef {object} Trial
+ * @property {string} api
+ * @property {string} slug       The temporary address the platform gave the game.
+ * @property {string} token      The upload key for this one game, good while it is online.
+ * @property {string} claimUrl   Opening this and signing up keeps the game.
+ * @property {number} expiresAt  When the game goes offline unless claimed.
+ * @property {number} keepUntil  Until when it can still be claimed.
+ */
+
+/**
+ * @param {unknown} t @param {string} api
+ * @returns {t is Trial} A record this tool wrote for this platform: every field of the kind it writes. (The claim
+ *   link is the platform's own answer, at the address the platform calls itself, which need not be the one it was reached at.)
+ */
+function isTrial(t, api) {
+  const r = /** @type {Record<string, unknown> | null} */ (t && typeof t === 'object' ? t : null)
+  return !!r && r.api === api && typeof r.token === 'string' && /^neme_[A-Za-z0-9_-]{20,}$/.test(r.token)
+    && typeof r.slug === 'string' && /^tmp-[a-z0-9]{6,36}$/.test(r.slug)
+    && typeof r.claimUrl === 'string' && /^https?:\/\/[^/\s]+\/claim\/[A-Za-z0-9_-]{32}$/.test(r.claimUrl)
+    && typeof r.expiresAt === 'number' && Number.isFinite(r.expiresAt) && typeof r.keepUntil === 'number' && Number.isFinite(r.keepUntil)
+}
+
+/** @param {string | null} file @returns {Promise<Record<string, unknown>>} What is remembered, by platform and project folder. */
+async function readTrials(file) {
+  if (!file) return {}
+  try {
+    const all = JSON.parse(await readFile(file, 'utf8'))
+    return all && typeof all === 'object' && !Array.isArray(all) ? all : {}
+  } catch {
+    return {} // nothing remembered yet (the usual case), or not readable: then there is no such game
+  }
+}
+
+/** @param {string} file @param {string} key @param {Trial} trial */
+async function rememberTrial(file, key, trial) {
+  await mkdir(path.dirname(file), { recursive: true, mode: 0o700 })
+  const all = await readTrials(file)
+  // (Records whose game can no longer be claimed are dropped as it goes.)
+  for (const [k, v] of Object.entries(all)) {
+    const until = /** @type {{ keepUntil?: unknown }} */ (v)?.keepUntil
+    if (typeof until !== 'number' || until < Date.now()) delete all[k]
+  }
+  all[key] = trial
+  // Written beside and moved into place: readable by its owner only, and never through a link someone put there.
+  const fresh = `${file}.${process.pid}.tmp`
+  await writeFile(fresh, `${JSON.stringify(all, null, 2)}\n`, { mode: 0o600, flag: 'wx' })
+  await rename(fresh, file)
+}
+
+/**
+ * Who a command acts as: the developer, by their API token, or (with none) the game this folder
+ * published without an account. `start` allows beginning such a game when there is neither.
+ * @param {{ dir: string, api: string, token?: string, start?: boolean, log?: (line: string) => void }} o
+ * @returns {Promise<{ token: string, slug?: string, trial: Trial | null }>}
+ */
+export async function access({ dir, api, token, start = false, log = console.log }) {
+  if (token) return { token, trial: null }
+  const project = await realpath(dir).catch(() => path.resolve(dir))
+  const key = `${api} ${project}`
+  const file = await trialsFile(project)
+  const saved = (await readTrials(file))[key]
+  if (isTrial(saved, api)) {
+    if (saved.expiresAt > Date.now()) {
+      log(`No API token: carrying on with the game this folder published without an account (${saved.slug}).`)
+      return { token: saved.token, slug: saved.slug, trial: saved }
+    }
+    throw new CliError(
+      `The game this folder published without an account went offline on ${when(saved.expiresAt)}. `
+      + `To keep it, open ${saved.claimUrl} (until ${when(saved.keepUntil)}), then set NEME_TOKEN to publish with your account. `
+      + `To start again without an account, run "neme forget" here.`,
+    )
+  }
+  const noToken = `No API token. Set NEME_TOKEN or pass --token. Create one at ${api}/dashboard`
+  if (!start) throw new CliError(noToken)
+  const manifest = await readManifest(dir)
+  // Checked before a game is started: one that could not be remembered would be started again on
+  // every publish, and only so many can be started in a day.
+  let writable = false
+  if (file) {
+    writable = await mkdir(path.dirname(file), { recursive: true, mode: 0o700 }).then(() => canAccess(path.dirname(file), constants.W_OK)).then(() => true, () => false)
+  }
+  if (!writable) {
+    throw new CliError(`Publishing without an account needs somewhere to remember the game, and ${file ? path.dirname(file) : 'a folder of your own outside the project'} cannot be written. Set NEME_STATE_DIR to a folder outside the project, or sign up: ${noToken}`)
+  }
+  let res
+  try {
+    res = await fetch(`${api}/api/v1/trials`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ slug: manifest.slug }) })
+  } catch (err) {
+    throw new CliError(`Could not reach ${api}: ${/** @type {Error} */ (err).cause ?? /** @type {Error} */ (err).message}`)
+  }
+  const data = /** @type {any} */ (await res.json().catch(() => ({})))
+  // (A platform that does not offer this answers as it always has: a token is needed.)
+  if (res.status === 404 || res.status === 405) throw new CliError(noToken)
+  /** @type {Trial} */
+  const trial = { api, slug: data.slug, token: data.token, claimUrl: data.claimUrl, expiresAt: data.expiresAt, keepUntil: data.keepUntil }
+  if (!res.ok || !isTrial(trial, api)) throw new CliError(`${data.error ?? `Could not publish without an account (${res.status}).`} ${noToken}`)
+  log('No API token, so this is published without an account: online for a day, yours to keep with the link below.')
+  try {
+    await rememberTrial(/** @type {string} */ (file), key, trial)
+  } catch (err) {
+    // The game exists and its link must not be lost with it: said now, in case nothing later is.
+    log(`  (Could not remember this game for next time: ${/** @type {Error} */ (err).message}. Keep this link, it is the only way to keep the game: ${trial.claimUrl})`)
+  }
+  return { token: trial.token, slug: trial.slug, trial }
+}
+
+/**
+ * Forgets the game this folder published without an account, so that the next publish starts another.
+ * The game itself is not touched: it stays online for its day and can still be claimed with its link.
+ * @param {{ dir: string, api: string, log?: (line: string) => void }} o
+ */
+export async function forget({ dir, api, log = console.log }) {
+  const project = await realpath(dir).catch(() => path.resolve(dir))
+  const key = `${api} ${project}`
+  const file = await trialsFile(project)
+  const all = await readTrials(file)
+  const saved = all[key]
+  if (!file || !isTrial(saved, api)) return void log('Nothing to forget: this folder has no game published without an account.')
+  delete all[key]
+  const fresh = `${file}.${process.pid}.tmp`
+  await writeFile(fresh, `${JSON.stringify(all, null, 2)}\n`, { mode: 0o600, flag: 'wx' })
+  await rename(fresh, file)
+  log(`Forgotten. The game is untouched: it can still be claimed at ${saved.claimUrl} until ${when(saved.keepUntil)}.`)
+}
+
 /** @param {number} n */
 const size = (n) => (n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`)
 
@@ -160,16 +343,28 @@ const PARALLEL = 6
  * not already have, then turn the upload into a version.
  * With `preview`, the version is uploaded but not made live: players stay where
  * they are, and the result carries the address where the new build can be tried.
- * @param {{ dir: string, api: string, token: string, preview?: boolean, log?: (line: string) => void }} o
- * @returns {Promise<{ version: number, url: string, live: boolean, warnings: string[], uploaded: number }>}
+ * With `trial` (a game published without an account), it goes to the address the platform gave it,
+ * and the result says how to keep it.
+ * @param {{ dir: string, api: string, token: string, preview?: boolean, trial?: Trial | null, log?: (line: string) => void }} o
+ * @returns {Promise<{ version: number, url: string, live: boolean, warnings: string[], uploaded: number, claimUrl?: string }>}
  */
-export async function publish({ dir, api, token, preview = false, log = console.log }) {
+export async function publish({ dir, api, token, preview: held = false, trial = null, log = console.log }) {
+  // A game without an account has no held-back versions: what is online for it is what its page shows.
+  const preview = held && !trial
+  if (held && trial) log('  (a game published without an account has no private previews: this goes online at its temporary address)')
   const manifest = await readManifest(dir)
   const buildDir = path.resolve(dir, manifest.dir ?? '.')
   const entry = manifest.entry ?? 'index.html'
 
   const info = await stat(buildDir).catch(() => null)
   if (!info?.isDirectory()) throw new CliError(`Build folder ${buildDir} does not exist. Did you run your build?`)
+  // What is published is the project's own build and nothing beside it. A neme.json is often
+  // someone else's (a repository that was cloned), and one saying "dir": ".." would otherwise
+  // put whatever sits next to the project online.
+  const [projectReal, buildReal] = await Promise.all([realpath(dir), realpath(buildDir)])
+  if (buildReal !== projectReal && !buildReal.startsWith(projectReal + path.sep)) {
+    throw new CliError(`"dir" in neme.json points outside this folder (${buildReal}). Put neme.json in the folder that contains your build.`)
+  }
   const files = await collectFiles(buildDir)
   if (!files.some((f) => f.path === entry)) throw new CliError(`${buildDir} has no ${entry}. Set "dir" in neme.json to your build output folder.`)
   if (manifest.cover && !files.some((f) => f.path === manifest.cover)) throw new CliError(`Cover "${manifest.cover}" was not found in ${buildDir}.`)
@@ -177,7 +372,8 @@ export async function publish({ dir, api, token, preview = false, log = console.
   const total = files.reduce((n, f) => n + f.size, 0)
   log(`${manifest.title}: ${files.length} file${files.length === 1 ? '' : 's'}, ${size(total)}`)
 
-  const { slug, dir: _dir, entry: _entry, ...details } = manifest
+  const { slug: ownSlug, dir: _dir, entry: _entry, ...details } = manifest
+  const slug = trial?.slug ?? ownSlug
   // A preview must leave the live game exactly as players see it, title and cover
   // included. So the details in neme.json are only sent with a preview when the
   // game does not exist yet and has to be created.
@@ -225,15 +421,24 @@ export async function publish({ dir, api, token, preview = false, log = console.
     log(`  try it:       ${out.previewUrl}`)
     log(`  make it live: neme promote ${out.version}`)
   }
-  return { version: out.version, url: out.live ? out.game.url : out.previewUrl, live: out.live, warnings: out.warnings ?? [], uploaded: missing.length }
+  if (trial) {
+    log(`  Published without an account: online until ${when(trial.expiresAt)}, in no list, at a temporary address.`)
+    log(`  To keep it, open this link and sign up (you choose its address then; neme.json asks for "${ownSlug}"):`)
+    log(`  ${trial.claimUrl}`)
+  }
+  return {
+    version: out.version, url: out.live ? out.game.url : out.previewUrl, live: out.live, warnings: out.warnings ?? [], uploaded: missing.length,
+    ...(trial ? { claimUrl: trial.claimUrl } : {}),
+  }
 }
 
 /**
  * Makes an already-uploaded version the live one. Works for a preview, and for going back to an earlier version.
- * @param {{ dir: string, api: string, token: string, version: number, log?: (line: string) => void }} o
+ * @param {{ dir: string, api: string, token: string, version: number, slug?: string, log?: (line: string) => void }} o
  */
-export async function promote({ dir, api, token, version, log = console.log }) {
-  const { slug, title } = await readManifest(dir)
+export async function promote({ dir, api, token, version, slug: as, log = console.log }) {
+  const { slug: own, title } = await readManifest(dir)
+  const slug = as ?? own
   const out = await call(api, token, 'POST', `/games/${slug}/activate`, { json: { version } })
   log(`${title}: v${version} is live`)
   log(`  ${out.game.url}`)
@@ -244,10 +449,11 @@ export async function promote({ dir, api, token, version, log = console.log }) {
 
 /**
  * Lists a game's versions, newest first, saying which one players are on.
- * @param {{ dir: string, api: string, token: string, log?: (line: string) => void }} o
+ * @param {{ dir: string, api: string, token: string, slug?: string, log?: (line: string) => void }} o
  */
-export async function versions({ dir, api, token, log = console.log }) {
-  const { slug, title } = await readManifest(dir)
+export async function versions({ dir, api, token, slug: as, log = console.log }) {
+  const { slug: own, title } = await readManifest(dir)
+  const slug = as ?? own
   const out = await call(api, token, 'GET', `/games/${slug}/versions`)
   /** @type {{ version: number, files: number, bytes: number, createdAt: number }[]} */
   const list = out.versions ?? []
@@ -260,10 +466,11 @@ export async function versions({ dir, api, token, log = console.log }) {
 
 /**
  * Deletes one version for good. The platform refuses the version players are on.
- * @param {{ dir: string, api: string, token: string, version: number, log?: (line: string) => void }} o
+ * @param {{ dir: string, api: string, token: string, version: number, slug?: string, log?: (line: string) => void }} o
  */
-export async function remove({ dir, api, token, version, log = console.log }) {
-  const { slug, title } = await readManifest(dir)
+export async function remove({ dir, api, token, version, slug: as, log = console.log }) {
+  const { slug: own, title } = await readManifest(dir)
+  const slug = as ?? own
   const out = await call(api, token, 'DELETE', `/games/${slug}/versions/${version}`)
   log(`${title}: v${version} is deleted${out.freedBytes ? `, ${size(out.freedBytes)} given back` : ''}`)
   return { freedBytes: /** @type {number} */ (out.freedBytes ?? 0) }
@@ -306,7 +513,7 @@ const TOOLS = [
   },
   {
     name: 'neme_publish',
-    description: 'Publish the game described by dir/neme.json to neme.world. With preview true, upload without going live and get a private link to try the build; publish for real only when the developer says so.',
+    description: 'Publish the game described by dir/neme.json to neme.world. With preview true, upload without going live and get a private link to try the build; publish for real only when the developer says so. Works with no NEME_TOKEN too: the game then goes online for a day at a temporary address, and the result ends with a claim link. Give the developer that link: opening it and signing up keeps the game.',
     inputSchema: {
       type: 'object',
       properties: { dir: { ...str, description: 'Folder holding neme.json. Default: the current folder.' }, preview: { type: 'boolean', description: 'Upload without making it live.' } },
@@ -352,18 +559,21 @@ async function runTool(name, args, env) {
     await init(dir, log)
     return lines.join('\n')
   }
-  if (!env.token) throw new CliError('No API token. The developer creates one at https://neme.world/dashboard and sets NEME_TOKEN for this server.')
-  if (name === 'neme_publish') await publish({ dir, api: env.api, token: env.token, preview: args.preview === true, log })
+  if (!TOOLS.some((t) => t.name === name)) throw new CliError(`No such tool: ${name}`)
+  // With no token, publishing begins (or carries on) a game without an account; the other tools work on that game.
+  const who = await access({ dir, api: env.api, token: env.token, start: name === 'neme_publish', log })
+  const { token, slug } = who
+  if (name === 'neme_publish') await publish({ dir, api: env.api, token, preview: args.preview === true, trial: who.trial, log })
   else if (name === 'neme_promote') {
     if (!Number.isInteger(args.version) || /** @type {number} */ (args.version) < 1) throw new CliError('version must be a whole number, 1 or more.')
-    await promote({ dir, api: env.api, token: env.token, version: /** @type {number} */ (args.version), log })
-  } else if (name === 'neme_versions') await versions({ dir, api: env.api, token: env.token, log })
+    await promote({ dir, api: env.api, token, slug, version: /** @type {number} */ (args.version), log })
+  } else if (name === 'neme_versions') await versions({ dir, api: env.api, token, slug, log })
   else if (name === 'neme_delete_version') {
     if (!Number.isInteger(args.version) || /** @type {number} */ (args.version) < 1) throw new CliError('version must be a whole number, 1 or more.')
-    await remove({ dir, api: env.api, token: env.token, version: /** @type {number} */ (args.version), log })
+    await remove({ dir, api: env.api, token, slug, version: /** @type {number} */ (args.version), log })
   } else if (name === 'neme_metrics') {
-    const { slug } = await readManifest(dir)
-    const out = await call(env.api, env.token, 'GET', `/games/${slug}/metrics`)
+    const own = (await readManifest(dir)).slug
+    const out = await call(env.api, token, 'GET', `/games/${slug ?? own}/metrics`)
     return JSON.stringify(out.totals ?? out, null, 2)
   } else throw new CliError(`No such tool: ${name}`)
   return lines.join('\n')
@@ -385,7 +595,7 @@ export async function answerMcp(msg, env) {
       protocolVersion: typeof msg.params?.protocolVersion === 'string' ? msg.params.protocolVersion : '2025-06-18',
       capabilities: { tools: {} },
       serverInfo: { name: 'neme-world', version: env.version },
-      instructions: 'Publishes web games to neme.world. Call neme_guide first. Publish with preview true and show the developer the link; make a version live only when they say so.',
+      instructions: 'Publishes web games to neme.world. Call neme_guide first. Publish with preview true and show the developer the link; make a version live only when they say so. If no NEME_TOKEN is set, neme_publish still works: the game is online for a day at a temporary, unlisted address, so publish it live and give the developer both links it returns, the game and the claim link that keeps it.',
     })
   }
   if (msg.method === 'ping') return reply({})
@@ -431,7 +641,11 @@ Usage
   neme promote <n> [dir]  Make version n live (a preview, or an earlier version)
   neme versions [dir]     List the game's versions, and which one players are on
   neme delete <n> [dir]   Delete version n for good (not the one players are on)
+  neme forget [dir]       Forget the game this folder published without an account
   neme mcp                Run as an MCP server, so a coding agent can do the above
+
+No account yet? "neme publish" works without a token: the game is online for a day at a
+temporary address, and the command prints a link that keeps it once you sign up.
 
 Options
   --preview               Upload without going live; prints a link to try the build
@@ -459,6 +673,7 @@ export async function main(argv) {
   if (values.help || !command) return void console.log(HELP)
 
   if (command === 'init') return init(dir)
+  if (command === 'forget') return forget({ dir, api: (values.api ?? process.env.NEME_API ?? DEFAULT_API).replace(/\/+$/, '') })
   if (command === 'mcp') {
     const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
     return serveMcp({
@@ -466,15 +681,17 @@ export async function main(argv) {
     })
   }
   if (command === 'publish' || command === 'promote' || command === 'versions' || command === 'delete') {
-    const token = values.token ?? process.env.NEME_TOKEN
-    if (!token) throw new CliError('No API token. Set NEME_TOKEN or pass --token. Create one at https://neme.world/dashboard')
     const api = (values.api ?? process.env.NEME_API ?? DEFAULT_API).replace(/\/+$/, '')
+    // (promote and delete take the version first: "neme promote 7 [dir]".)
+    const folder = command === 'publish' || command === 'versions' ? dir : positionals[2] ?? '.'
+    const who = await access({ dir: folder, api, token: values.token ?? process.env.NEME_TOKEN, start: command === 'publish' })
+    const { token, slug } = who
     if (command === 'publish') {
-      await publish({ dir, api, token, preview: values.preview })
+      await publish({ dir, api, token, preview: values.preview, trial: who.trial })
       return
     }
     if (command === 'versions') {
-      await versions({ dir, api, token })
+      await versions({ dir, api, token, slug })
       return
     }
     // promote <version> [dir], delete <version> [dir]
@@ -482,8 +699,8 @@ export async function main(argv) {
     if (!Number.isInteger(version) || version < 1) {
       throw new CliError(command === 'delete' ? 'Say which version to delete, for example: neme delete 3' : 'Say which version to make live, for example: neme promote 7')
     }
-    if (command === 'delete') await remove({ dir: positionals[2] ?? '.', api, token, version })
-    else await promote({ dir: positionals[2] ?? '.', api, token, version })
+    if (command === 'delete') await remove({ dir: folder, api, token, slug, version })
+    else await promote({ dir: folder, api, token, slug, version })
     return
   }
   throw new CliError(`Unknown command "${command}". Try "neme --help".`)

@@ -1,6 +1,6 @@
 {
   "name": "neme-world",
-  "version": "0.5.2",
+  "version": "0.6.0",
   "description": "Publish web games to neme.world from the command line",
   "keywords": ["neme", "games", "web games", "html5 games", "game hosting", "publish", "deploy", "cli", "mcp", "mcp-server", "ai agents"],
   "homepage": "https://neme.world/developers",

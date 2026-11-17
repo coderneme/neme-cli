@@ -10,6 +10,21 @@ npx neme-world init        # writes neme.json
 npx neme-world publish     # uploads your build and puts it live
 ```
 
+## No account yet?
+
+```sh
+npx neme-world publish     # no token set
+```
+
+The game goes online at once, for 24 hours, at a temporary address that is in no list. The command prints a
+claim link: open it, sign up, and the game is yours, at the address in your `neme.json` if it is free. Unclaimed,
+it goes offline after the day and is deleted a week later. A game published this way can be up to 20 MB.
+
+Publishing again from the same folder, on the same machine, updates the same game: the tool remembers it in
+your own settings folder (`~/.config/neme-world/`), never in the project. A game published this way has no
+private previews; `--preview` is ignored for it. Once you have an account, set `NEME_TOKEN` and what was
+remembered is ignored; `neme forget` drops it.
+
 ## Before you publish
 
 1. Create an account at [neme.world](https://neme.world/signup). Anyone can; there is no waiting list. Confirm
@@ -39,7 +54,7 @@ have looked at your first game; your later games appear at once.
 | `title` | Shown to players. |
 | `description` | Shown on the game's page and in link previews. |
 | `tags` | Up to 8, used for browsing. |
-| `dir` | Folder holding your built `index.html`, relative to `neme.json`. Default `.` |
+| `dir` | Folder holding your built `index.html`, relative to `neme.json` and inside its folder. Default `.` |
 | `entry` | The HTML file to open, if it isn't `index.html`. |
 | `cover` | An image inside `dir`. Leave it out and neme.world takes a screenshot for you. |
 | `aspect` | Shape of the game on its page: `16:9` (default), `4:3`, `1:1`, `3:4` or `9:16`. |
@@ -112,4 +127,4 @@ your agent's MCP servers:
 
 Tools: `neme_guide` (how to make a game that works on neme.world), `neme_init`, `neme_publish` (with `preview`),
 `neme_promote`, `neme_versions`, `neme_delete_version` and `neme_metrics`. The agent is told to upload a preview, show you the link, and make a version
-live only when you say so. The guide it reads is also at https://neme.world/llms.txt.
+live only when you say so. With no `NEME_TOKEN` it can still publish: you get the game's link for a day and a claim link that keeps it. The guide it reads is also at https://neme.world/llms.txt.
