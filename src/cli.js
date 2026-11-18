@@ -499,45 +499,71 @@ async function init(dir, log = console.log) {
 // Context Protocol over standard input and output: one JSON-RPC message per
 // line. The tools are the commands above and nothing more, with the same token.
 
-const str = { type: 'string' }
+// What a tool is, for the agent choosing one: what it does, what it changes and whether that can be undone, what it
+// needs, what comes back, and which tool to use instead. An agent reads nothing else before calling.
+const DIR = {
+  type: 'string',
+  description: 'The project folder: the one holding neme.json. Absolute, or relative to the folder this server was started in. Default: that folder.',
+}
+const VERSION = {
+  type: 'integer',
+  minimum: 1,
+  description: 'The version\'s number, as neme_versions lists it (v3 is 3).',
+}
+// Read from neme.world and change nothing.
+const READS = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
 const TOOLS = [
   {
     name: 'neme_guide',
-    description: 'How to make a game that works on neme.world and publish it: the neme.json fields, the rules a build must meet, the SDK (scores, leaderboards, sharing, clips). Read this first.',
+    title: 'Read the neme.world guide',
+    description: 'Fetch the guide to making and publishing a game on neme.world: the neme.json fields, the rules a build must meet, the SDK (scores, leaderboards, sharing, clips). Call it first, before neme_init or neme_publish. Changes nothing and needs no token. Returns the whole guide as Markdown, a few pages long, always the current one.',
     inputSchema: { type: 'object', properties: {} },
+    annotations: READS,
   },
   {
     name: 'neme_init',
-    description: 'Create a neme.json in a project folder (slug, title, description, tags, dir). Edit it afterwards.',
-    inputSchema: { type: 'object', properties: { dir: { ...str, description: 'Project folder. Default: the current folder.' } } },
+    title: 'Create neme.json',
+    description: 'Create neme.json in a project folder, filled in from the folder\'s name (slug, title, empty description and tags, and dir: "dist" if that folder exists, otherwise "."). Use it once, for a project that has no neme.json; then edit the file and call neme_publish. Writes that one file and nothing else: no network, no token. Never overwrites: if neme.json is already there it fails and changes nothing. Returns one line naming the file it wrote.',
+    inputSchema: { type: 'object', properties: { dir: { ...DIR, description: 'The folder to create neme.json in. Absolute, or relative to the folder this server was started in. Default: that folder.' } } },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   },
   {
     name: 'neme_publish',
-    description: 'Publish the game described by dir/neme.json to neme.world. With preview true, upload without going live and get a private link to try the build; publish for real only when the developer says so. Works with no NEME_TOKEN too: the game then goes online for a day at a temporary address, and the result ends with a claim link. Give the developer that link: opening it and signing up keeps the game.',
+    title: 'Publish a game',
+    description: 'Upload the game described by dir/neme.json to neme.world as a new numbered version. With preview true it stays private and players see no change; without it the new version becomes the one players get, so do that only when the developer says so. Earlier versions are kept: neme_promote goes back to one, and makes an approved preview live without uploading again. Uses NEME_TOKEN; with none, the game goes online for a day at a temporary, unlisted address (previews too) and the result ends with a claim link to give the developer, who keeps the game by opening it and signing up. Returns text: the version number, its download size, and the link to play or try it. Fails, changing nothing players see, if neme.json is missing or the build breaks a rule in neme_guide.',
     inputSchema: {
       type: 'object',
-      properties: { dir: { ...str, description: 'Folder holding neme.json. Default: the current folder.' }, preview: { type: 'boolean', description: 'Upload without making it live.' } },
+      properties: { dir: DIR, preview: { type: 'boolean', description: 'true: upload as a private preview, leaving what players get unchanged. false or left out: make the new version live.' } },
     },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   },
   {
     name: 'neme_promote',
-    description: 'Make an already-uploaded version live: a preview the developer has approved, or an earlier version to roll back to.',
-    inputSchema: { type: 'object', properties: { dir: str, version: { type: 'integer', minimum: 1 } }, required: ['version'] },
+    title: 'Make a version live',
+    description: 'Make a version that is already uploaded the one players get: a preview the developer has approved, or an earlier version to roll back to. It uploads nothing (neme_publish does that) and leaves the title, cover and other details as they are. Players move to that version at once; the version they were on is kept, so calling this again with its number undoes it. Find numbers with neme_versions. Uses the same token as neme_publish. Returns the version now live and the game\'s link. Fails, changing nothing, if there is no such version.',
+    inputSchema: { type: 'object', properties: { dir: DIR, version: VERSION }, required: ['version'] },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   },
   {
     name: 'neme_versions',
-    description: 'List a game\'s versions, newest first, and which one players are on. A game keeps a limited number; when a publish is refused for that, older ones have to be deleted.',
-    inputSchema: { type: 'object', properties: { dir: { ...str, description: 'Folder holding neme.json. Default: the current folder.' } } },
+    title: 'List a game\'s versions',
+    description: 'List the versions of the game in dir/neme.json, newest first: each one\'s number, date, file count and size, and which one players are on. Changes nothing. Use it to find the number neme_promote or neme_delete_version needs. A game keeps a limited number of versions: when neme_publish is refused for that, list them here and delete old ones with neme_delete_version. Uses the same token as neme_publish. Returns plain text, one line per version. Fails if neme.json is missing or the game has never been published.',
+    inputSchema: { type: 'object', properties: { dir: DIR } },
+    annotations: READS,
   },
   {
     name: 'neme_delete_version',
-    description: 'Delete one version of a game for good. It cannot be undone, so do it only when the developer has said which version to delete. The version players are on cannot be deleted.',
-    inputSchema: { type: 'object', properties: { dir: str, version: { type: 'integer', minimum: 1 } }, required: ['version'] },
+    title: 'Delete a version',
+    description: 'Delete one version of a game for good, giving its storage back. It cannot be undone and asks for no confirmation, so call it only when the developer has said which version to delete; neme_versions shows the candidates. The version players are on is refused: to remove it, first make another live with neme_promote. Other versions and the game itself are untouched. Uses the same token as neme_publish. Returns the version deleted and the storage freed. Fails, changing nothing, if there is no such version.',
+    inputSchema: { type: 'object', properties: { dir: DIR, version: VERSION }, required: ['version'] },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
   },
   {
     name: 'neme_metrics',
-    description: 'The last 30 days of a game: views, plays, time played, shares.',
-    inputSchema: { type: 'object', properties: { dir: { ...str, description: 'Folder holding neme.json. Default: the current folder.' } } },
+    title: 'Read a game\'s numbers',
+    description: 'Read how the game in dir/neme.json did over the last 30 days. Changes nothing. Use it when the developer asks how a game is doing; for which build players are on, use neme_versions. Uses the same token as neme_publish, and only the game\'s own developer can read them. Returns one JSON object of totals: views, visitors, plays, players, playSeconds, shares, playRate (plays per view, 0 to 1), avgPlaySeconds, medianLoadMs, sharedViews, sharedPlays, platformPlays. Fails if the game has never been published.',
+    inputSchema: { type: 'object', properties: { dir: DIR } },
+    annotations: READS,
   },
 ]
 
