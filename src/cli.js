@@ -257,6 +257,20 @@ async function rememberTrial(file, key, trial) {
 }
 
 /**
+ * A preview is private only with an account. Without one, everything published is online at once, so a preview
+ * asked for without a token is refused before anything is started or uploaded: quietly publishing it in the open
+ * would show an unfinished game to anyone with the link, which is what asking for a preview meant to avoid.
+ * @param {string} api
+ */
+export function noPrivatePreview(api) {
+  return new CliError(
+    'A private preview needs an account, and no API token is set. Without one, anything published is online at once, '
+    + 'at a temporary unlisted address that anyone with the link can open. Nothing was uploaded. '
+    + `To keep it private, set NEME_TOKEN (create one at ${api}/dashboard). To put it online anyway, publish again without the preview.`,
+  )
+}
+
+/**
  * Who a command acts as: the developer, by their API token, or (with none) the game this folder
  * published without an account. `start` allows beginning such a game when there is neither.
  * @param {{ dir: string, api: string, token?: string, start?: boolean, log?: (line: string) => void }} o
@@ -348,10 +362,9 @@ const PARALLEL = 6
  * @param {{ dir: string, api: string, token: string, preview?: boolean, trial?: Trial | null, log?: (line: string) => void }} o
  * @returns {Promise<{ version: number, url: string, live: boolean, warnings: string[], uploaded: number, claimUrl?: string }>}
  */
-export async function publish({ dir, api, token, preview: held = false, trial = null, log = console.log }) {
+export async function publish({ dir, api, token, preview = false, trial = null, log = console.log }) {
   // A game without an account has no held-back versions: what is online for it is what its page shows.
-  const preview = held && !trial
-  if (held && trial) log('  (a game published without an account has no private previews: this goes online at its temporary address)')
+  if (preview && trial) throw noPrivatePreview(api)
   const manifest = await readManifest(dir)
   const buildDir = path.resolve(dir, manifest.dir ?? '.')
   const entry = manifest.entry ?? 'index.html'
@@ -501,6 +514,12 @@ async function init(dir, log = console.log) {
 
 // What a tool is, for the agent choosing one: what it does, what it changes and whether that can be undone, what it
 // needs, what comes back, and which tool to use instead. An agent reads nothing else before calling.
+/** The site's own icon, for a host that shows one beside the server's name. The same list is in server.json. */
+const ICONS = [
+  { src: 'https://neme.world/static/icon-192.png', mimeType: 'image/png', sizes: ['192x192'] },
+  { src: 'https://neme.world/static/icon-512.png', mimeType: 'image/png', sizes: ['512x512'] },
+]
+
 const DIR = {
   type: 'string',
   description: 'The project folder: the one holding neme.json. Absolute, or relative to the folder this server was started in. Default: that folder.',
@@ -530,10 +549,10 @@ const TOOLS = [
   {
     name: 'neme_publish',
     title: 'Publish a game',
-    description: 'Upload the game described by dir/neme.json to neme.world as a new numbered version. With preview true it stays private and players see no change; without it the new version becomes the one players get, so do that only when the developer says so. Earlier versions are kept: neme_promote goes back to one, and makes an approved preview live without uploading again. Uses NEME_TOKEN; with none, the game goes online for a day at a temporary, unlisted address (previews too) and the result ends with a claim link to give the developer, who keeps the game by opening it and signing up. Returns text: the version number, its download size, and the link to play or try it. Fails, changing nothing players see, if neme.json is missing or the build breaks a rule in neme_guide.',
+    description: 'Upload the game described by dir/neme.json to neme.world as a new numbered version. With preview true it stays private and players see no change; without it the new version becomes the one players get, so do that only when the developer says so. Earlier versions are kept: neme_promote goes back to one, and makes an approved preview live without uploading again. Uses NEME_TOKEN; with none, the game goes online for a day at a temporary, unlisted address (preview true then fails, uploading nothing) and the result ends with a claim link to give the developer, who keeps the game by opening it and signing up. Returns text: the version number, its download size, and the link to play or try it. Fails, changing nothing players see, if neme.json is missing or the build breaks a rule in neme_guide.',
     inputSchema: {
       type: 'object',
-      properties: { dir: DIR, preview: { type: 'boolean', description: 'true: upload as a private preview, leaving what players get unchanged. false or left out: make the new version live.' } },
+      properties: { dir: DIR, preview: { type: 'boolean', description: 'true: upload as a private preview, leaving what players get unchanged. Needs NEME_TOKEN: with no token there are no private previews, and it fails without uploading anything. false or left out: make the new version live.' } },
     },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   },
@@ -565,6 +584,13 @@ const TOOLS = [
     inputSchema: { type: 'object', properties: { dir: DIR } },
     annotations: READS,
   },
+  {
+    name: 'neme_playtest',
+    title: 'Read a game\'s playtest report',
+    description: 'Read what happened when people played each version of the game in dir/neme.json: the evidence for deciding what to change next. Changes nothing. Use it before changing a game that has been played, and again after the next version has been played, to see whether the change helped; for totals by day use neme_metrics. Uses the same token as neme_publish, and only the game\'s own developer can read it. Returns one JSON object: live (the version players are on), since (first day read), versions (newest first; each with opened, pressedPlay, loaded, ready, stayed30s, stayed2m, stayed5m, players, medianSeconds, medianLoadMs, broughtBy, checkpoints the game marked with how many reached each and how many stopped after it, counts of notes players wrote, and readings: what the numbers plainly say) and compared (the newest version beside the one before). Every count is a sitting, one visit to the game\'s page; the developer\'s own plays are left out. readings and compared are empty when too few people played: then say so rather than drawing conclusions from the counts. Fails if the game has never been published.',
+    inputSchema: { type: 'object', properties: { dir: DIR } },
+    annotations: READS,
+  },
 ]
 
 /**
@@ -586,6 +612,7 @@ async function runTool(name, args, env) {
     return lines.join('\n')
   }
   if (!TOOLS.some((t) => t.name === name)) throw new CliError(`No such tool: ${name}`)
+  if (name === 'neme_publish' && args.preview === true && !env.token) throw noPrivatePreview(env.api)
   // With no token, publishing begins (or carries on) a game without an account; the other tools work on that game.
   const who = await access({ dir, api: env.api, token: env.token, start: name === 'neme_publish', log })
   const { token, slug } = who
@@ -601,6 +628,9 @@ async function runTool(name, args, env) {
     const own = (await readManifest(dir)).slug
     const out = await call(env.api, token, 'GET', `/games/${slug ?? own}/metrics`)
     return JSON.stringify(out.totals ?? out, null, 2)
+  } else if (name === 'neme_playtest') {
+    const own = (await readManifest(dir)).slug
+    return JSON.stringify(await call(env.api, token, 'GET', `/games/${slug ?? own}/playtest`), null, 2)
   } else throw new CliError(`No such tool: ${name}`)
   return lines.join('\n')
 }
@@ -620,7 +650,7 @@ export async function answerMcp(msg, env) {
     return reply({
       protocolVersion: typeof msg.params?.protocolVersion === 'string' ? msg.params.protocolVersion : '2025-06-18',
       capabilities: { tools: {} },
-      serverInfo: { name: 'neme-world', version: env.version },
+      serverInfo: { name: 'neme-world', title: 'neme.world', version: env.version, websiteUrl: 'https://neme.world/developers', icons: ICONS },
       instructions: 'Publishes web games to neme.world. Call neme_guide first. Publish with preview true and show the developer the link; make a version live only when they say so. If no NEME_TOKEN is set, neme_publish still works: the game is online for a day at a temporary, unlisted address, so publish it live and give the developer both links it returns, the game and the claim link that keeps it.',
     })
   }
@@ -674,7 +704,8 @@ No account yet? "neme publish" works without a token: the game is online for a d
 temporary address, and the command prints a link that keeps it once you sign up.
 
 Options
-  --preview               Upload without going live; prints a link to try the build
+  --preview               Upload without going live; prints a link to try the build.
+                          Needs an account: without a token it stops, uploading nothing
   --api <url>             Platform address (default: $NEME_API or ${DEFAULT_API})
   --token <token>         API token (default: $NEME_TOKEN). Create one in your dashboard.
   -h, --help              Show this help
@@ -710,7 +741,9 @@ export async function main(argv) {
     const api = (values.api ?? process.env.NEME_API ?? DEFAULT_API).replace(/\/+$/, '')
     // (promote and delete take the version first: "neme promote 7 [dir]".)
     const folder = command === 'publish' || command === 'versions' ? dir : positionals[2] ?? '.'
-    const who = await access({ dir: folder, api, token: values.token ?? process.env.NEME_TOKEN, start: command === 'publish' })
+    const given = values.token ?? process.env.NEME_TOKEN
+    if (command === 'publish' && values.preview && !given) throw noPrivatePreview(api)
+    const who = await access({ dir: folder, api, token: given, start: command === 'publish' })
     const { token, slug } = who
     if (command === 'publish') {
       await publish({ dir, api, token, preview: values.preview, trial: who.trial })

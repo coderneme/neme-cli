@@ -22,7 +22,7 @@ it goes offline after the day and is deleted a week later. A game published this
 
 Publishing again from the same folder, on the same machine, updates the same game: the tool remembers it in
 your own settings folder (`~/.config/neme-world/`), never in the project. A game published this way has no
-private previews; `--preview` is ignored for it. Once you have an account, set `NEME_TOKEN` and what was
+private previews: `--preview` without a token stops before uploading anything, rather than put the build online. Once you have an account, set `NEME_TOKEN` and what was
 remembered is ignored; `neme forget` drops it.
 
 ## Before you publish
@@ -126,5 +126,6 @@ your agent's MCP servers:
 ```
 
 Tools: `neme_guide` (how to make a game that works on neme.world), `neme_init`, `neme_publish` (with `preview`),
-`neme_promote`, `neme_versions`, `neme_delete_version` and `neme_metrics`. The agent is told to upload a preview, show you the link, and make a version
+`neme_promote`, `neme_versions`, `neme_delete_version`, `neme_metrics` and `neme_playtest` (what happened when people
+played each version: how far they got and where they stopped). The agent is told to upload a preview, show you the link, and make a version
 live only when you say so. With no `NEME_TOKEN` it can still publish: you get the game's link for a day and a claim link that keeps it. The guide it reads is also at https://neme.world/llms.txt.

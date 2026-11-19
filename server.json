@@ -4,16 +4,20 @@
   "title": "neme.world",
   "description": "Publish a web game to neme.world: upload a preview, go live, roll back, read its play numbers.",
   "websiteUrl": "https://neme.world/developers",
+  "icons": [
+    { "src": "https://neme.world/static/icon-192.png", "mimeType": "image/png", "sizes": ["192x192"] },
+    { "src": "https://neme.world/static/icon-512.png", "mimeType": "image/png", "sizes": ["512x512"] }
+  ],
   "repository": {
     "url": "https://github.com/coderneme/neme-cli",
     "source": "github"
   },
-  "version": "0.6.1",
+  "version": "0.7.0",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "neme-world",
-      "version": "0.6.1",
+      "version": "0.7.0",
       "transport": { "type": "stdio" },
       "packageArguments": [{ "type": "positional", "value": "mcp" }],
       "environmentVariables": [
