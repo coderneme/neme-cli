@@ -12,12 +12,12 @@
     "url": "https://github.com/coderneme/neme-cli",
     "source": "github"
   },
-  "version": "0.7.0",
+  "version": "0.7.1",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "neme-world",
-      "version": "0.7.0",
+      "version": "0.7.1",
       "transport": { "type": "stdio" },
       "packageArguments": [{ "type": "positional", "value": "mcp" }],
       "environmentVariables": [

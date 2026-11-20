@@ -429,6 +429,9 @@ export async function publish({ dir, api, token, preview = false, trial = null, 
   if (out.live) {
     log(`  v${out.version} is live — ${size(out.transferBytes)} to download${saved}`)
     log(`  ${out.game.url}`)
+    // Players come mostly from the developer's own posts and pages: hand over what to paste. (Not for a game
+    // without an account: it is gone in a day unless claimed, and a badge would outlive it.)
+    if (!trial) log(`  README badge: ${badge(out.game.url)}`)
   } else {
     log(`  v${out.version} is uploaded as a preview — ${size(out.transferBytes)} to download${saved}`)
     log(`  try it:       ${out.previewUrl}`)
@@ -446,15 +449,26 @@ export async function publish({ dir, api, token, preview = false, trial = null, 
 }
 
 /**
- * Makes an already-uploaded version the live one. Works for a preview, and for going back to an earlier version.
- * @param {{ dir: string, api: string, token: string, version: number, slug?: string, log?: (line: string) => void }} o
+ * The Markdown for a "Play on neme.world" badge linking to the game, for a README. The link says it came from a
+ * badge (`ref=badge`), so the plays it brings are counted by name on the game's dashboard.
+ * @param {string} url the game's page
  */
-export async function promote({ dir, api, token, version, slug: as, log = console.log }) {
+export function badge(url) {
+  const page = new URL(url)
+  return `[![Play on neme.world](${page.origin}/static/badge.svg)](${page.origin}${page.pathname}?ref=badge)`
+}
+
+/**
+ * Makes an already-uploaded version the live one. Works for a preview, and for going back to an earlier version.
+ * @param {{ dir: string, api: string, token: string, version: number, slug?: string, trial?: Trial | null, log?: (line: string) => void }} o
+ */
+export async function promote({ dir, api, token, version, slug: as, trial = null, log = console.log }) {
   const { slug: own, title } = await readManifest(dir)
   const slug = as ?? own
   const out = await call(api, token, 'POST', `/games/${slug}/activate`, { json: { version } })
   log(`${title}: v${version} is live`)
   log(`  ${out.game.url}`)
+  if (!trial) log(`  README badge: ${badge(out.game.url)}`)
   // Promoting moves players to a version; it deliberately leaves the title, cover and other details alone.
   log('  (details in neme.json were not changed; "neme publish" applies them)')
   return { url: out.game.url }
@@ -549,7 +563,7 @@ const TOOLS = [
   {
     name: 'neme_publish',
     title: 'Publish a game',
-    description: 'Upload the game described by dir/neme.json to neme.world as a new numbered version. With preview true it stays private and players see no change; without it the new version becomes the one players get, so do that only when the developer says so. Earlier versions are kept: neme_promote goes back to one, and makes an approved preview live without uploading again. Uses NEME_TOKEN; with none, the game goes online for a day at a temporary, unlisted address (preview true then fails, uploading nothing) and the result ends with a claim link to give the developer, who keeps the game by opening it and signing up. Returns text: the version number, its download size, and the link to play or try it. Fails, changing nothing players see, if neme.json is missing or the build breaks a rule in neme_guide.',
+    description: 'Upload the game described by dir/neme.json to neme.world as a new numbered version. With preview true it stays private and players see no change; without it the new version becomes the one players get, so do that only when the developer says so. Earlier versions are kept: neme_promote goes back to one, and makes an approved preview live without uploading again. Uses NEME_TOKEN; with none, the game goes online for a day at a temporary, unlisted address (preview true then fails, uploading nothing) and the result ends with a claim link to give the developer, who keeps the game by opening it and signing up. Returns text: the version number, its download size, the link to play or try it, and once live a README badge line (Markdown) to offer the developer. Fails, changing nothing players see, if neme.json is missing or the build breaks a rule in neme_guide.',
     inputSchema: {
       type: 'object',
       properties: { dir: DIR, preview: { type: 'boolean', description: 'true: upload as a private preview, leaving what players get unchanged. Needs NEME_TOKEN: with no token there are no private previews, and it fails without uploading anything. false or left out: make the new version live.' } },
@@ -559,7 +573,7 @@ const TOOLS = [
   {
     name: 'neme_promote',
     title: 'Make a version live',
-    description: 'Make a version that is already uploaded the one players get: a preview the developer has approved, or an earlier version to roll back to. It uploads nothing (neme_publish does that) and leaves the title, cover and other details as they are. Players move to that version at once; the version they were on is kept, so calling this again with its number undoes it. Find numbers with neme_versions. Uses the same token as neme_publish. Returns the version now live and the game\'s link. Fails, changing nothing, if there is no such version.',
+    description: 'Make a version that is already uploaded the one players get: a preview the developer has approved, or an earlier version to roll back to. It uploads nothing (neme_publish does that) and leaves the title, cover and other details as they are. Players move to that version at once; the version they were on is kept, so calling this again with its number undoes it. Find numbers with neme_versions. Uses the same token as neme_publish. Returns the version now live, the game\'s link and a README badge line to offer the developer. Fails, changing nothing, if there is no such version.',
     inputSchema: { type: 'object', properties: { dir: DIR, version: VERSION }, required: ['version'] },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   },
@@ -619,7 +633,7 @@ async function runTool(name, args, env) {
   if (name === 'neme_publish') await publish({ dir, api: env.api, token, preview: args.preview === true, trial: who.trial, log })
   else if (name === 'neme_promote') {
     if (!Number.isInteger(args.version) || /** @type {number} */ (args.version) < 1) throw new CliError('version must be a whole number, 1 or more.')
-    await promote({ dir, api: env.api, token, slug, version: /** @type {number} */ (args.version), log })
+    await promote({ dir, api: env.api, token, slug, version: /** @type {number} */ (args.version), trial: who.trial, log })
   } else if (name === 'neme_versions') await versions({ dir, api: env.api, token, slug, log })
   else if (name === 'neme_delete_version') {
     if (!Number.isInteger(args.version) || /** @type {number} */ (args.version) < 1) throw new CliError('version must be a whole number, 1 or more.')
@@ -651,7 +665,7 @@ export async function answerMcp(msg, env) {
       protocolVersion: typeof msg.params?.protocolVersion === 'string' ? msg.params.protocolVersion : '2025-06-18',
       capabilities: { tools: {} },
       serverInfo: { name: 'neme-world', title: 'neme.world', version: env.version, websiteUrl: 'https://neme.world/developers', icons: ICONS },
-      instructions: 'Publishes web games to neme.world. Call neme_guide first. Publish with preview true and show the developer the link; make a version live only when they say so. If no NEME_TOKEN is set, neme_publish still works: the game is online for a day at a temporary, unlisted address, so publish it live and give the developer both links it returns, the game and the claim link that keeps it.',
+      instructions: 'Publishes web games to neme.world. Call neme_guide first. Publish with preview true and show the developer the link; make a version live only when they say so. If no NEME_TOKEN is set, neme_publish still works: the game is online for a day at a temporary, unlisted address, so publish it live and give the developer both links it returns, the game and the claim link that keeps it. Once a game is live, offer to add the README badge the result gives to the project\'s README, and add it only if the developer agrees.',
     })
   }
   if (msg.method === 'ping') return reply({})
@@ -759,7 +773,7 @@ export async function main(argv) {
       throw new CliError(command === 'delete' ? 'Say which version to delete, for example: neme delete 3' : 'Say which version to make live, for example: neme promote 7')
     }
     if (command === 'delete') await remove({ dir: folder, api, token, slug, version })
-    else await promote({ dir: folder, api, token, slug, version })
+    else await promote({ dir: folder, api, token, slug, version, trial: who.trial })
     return
   }
   throw new CliError(`Unknown command "${command}". Try "neme --help".`)
